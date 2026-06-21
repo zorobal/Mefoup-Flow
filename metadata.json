@@ -1,0 +1,6 @@
+{
+  "name": "ERP Agro-Pastoral Intégré (SYSCOHADA)",
+  "description": "Plateforme ERP intégrée pour la gestion agro-pastorale avec agriculture, élevage, stocks et magasins, parc matériel (GMAO), comptabilité SYSCOHADA, RH, GED et Business Intelligence (BI).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
