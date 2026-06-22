@@ -29,6 +29,7 @@ export interface SaaSClient {
   maxUtilisateurs: number;
   superAdminLogin?: string;
   superAdminPassword?: string;
+  mustChangePassword?: boolean;
 }
 
 export interface SaaSLog {
@@ -646,6 +647,7 @@ export interface Utilisateur {
   password: string;
   roleId: string; // e.g. 'role-superadmin', 'role-veto', 'role-comptable', 'role-ouvrier'
   statut: 'Actif' | 'Inactif';
+  mustChangePassword?: boolean;
 }
 
 export interface TenantDatabase {

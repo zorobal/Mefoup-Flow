@@ -162,7 +162,10 @@ import {
   ArrowRight,
   Settings,
   Wrench,
-  LineChart
+  LineChart,
+  Eye,
+  EyeOff,
+  Download
 } from 'lucide-react';
 
 export default function App() {
@@ -186,6 +189,17 @@ export default function App() {
   });
   const [authError, setAuthError] = useState<string>('');
   const [suspendedClientMessage, setSuspendedClientMessage] = useState<string | null>(null);
+
+  // Custom Reset Passcode State (Avoids window.prompt iframe sandbox limits)
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resetPasswordInput, setResetPasswordInput] = useState('');
+  const [resetStep, setResetStep] = useState<'password' | 'confirm'>('password');
+  const [resetError, setResetError] = useState('');
+
+  // SaaS Client Active List Visibility/Masking states
+  const [showSaaSList, setShowSaaSList] = useState<boolean>(false);
+  const [saaSListPasscode, setSaaSListPasscode] = useState<string>('');
+  const [saaSListError, setSaaSListError] = useState<string>('');
 
   // Signon Input Fields
   const [loginEmail, setLoginEmail] = useState('');
@@ -225,6 +239,28 @@ export default function App() {
     }
     return INITIAL_SAAS_LOGS;
   });
+
+  // SaaS Subscription Plans and limits
+  const [saasPlanConfigs, setSaasPlanConfigs] = useState(() => {
+    const saved = localStorage.getItem('saasPlanConfigs');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return {
+      Starter: { id: 'Starter', name: 'STARTER', price: 35000, priceUnit: 'mois', maxUsers: 5, maxSurface: 20, modules: ['dashboard', 'agriculture', 'stocks', 'ged'] },
+      Professional: { id: 'Professional', name: 'PROFESSIONAL', price: 95000, priceUnit: 'mois', maxUsers: 25, maxSurface: 100, modules: ['dashboard', 'agriculture', 'elevage', 'stocks', 'commercial', 'compta', 'ged', 'parc-materiel'] },
+      Enterprise: { id: 'Enterprise', name: 'ENTERPRISE', price: 250000, priceUnit: 'mois', maxUsers: 100, maxSurface: 500, modules: ['dashboard', 'agriculture', 'elevage', 'stocks', 'commercial', 'compta', 'rh', 'ged', 'settings', 'parc-materiel', 'bi-reporting'] },
+      Cooperative: { id: 'Cooperative', name: 'COOPÉRATIVE', price: 800000, priceUnit: 'an', maxUsers: 250, maxSurface: 2000, modules: ['dashboard', 'agriculture', 'elevage', 'stocks', 'commercial', 'compta', 'rh', 'ged', 'settings', 'parc-materiel', 'bi-reporting'] }
+    };
+  });
+
+  React.useEffect(() => {
+    localStorage.setItem('saasPlanConfigs', JSON.stringify(saasPlanConfigs));
+  }, [saasPlanConfigs]);
 
   // -------------------------------------------------------------
   // isolated tenant-database & settings configuration architecture
@@ -803,7 +839,64 @@ export default function App() {
 
   // SaaS administrator actions
   const handleProvisionTenant = (newClient: SaaSClient) => {
-    setSaasClients(prev => [...prev, newClient]);
+    // 1. Add client to saasClients list
+    setSaasClients(prev => {
+      const updated = [...prev, newClient];
+      localStorage.setItem('saasClients', JSON.stringify(updated));
+      return updated;
+    });
+
+    // 2. Initialize dynamic database
+    const newDb = getInitialDatabase(newClient.id);
+    
+    // Seed with the primary super-admin user
+    const defaultUser: Utilisateur = {
+      id: 'usr-admin-virtuel',
+      nom: `${newClient.responsablePrenom} ${newClient.responsableNom}`,
+      email: newClient.superAdminLogin || newClient.responsableEmail || '',
+      password: newClient.superAdminPassword || '',
+      roleId: 'role-superadmin',
+      statut: 'Actif',
+      mustChangePassword: newClient.mustChangePassword
+    };
+    newDb.utilisateurs = [defaultUser];
+
+    // Seed audit seed line to confirm encryption key initialisation
+    newDb.auditLogs = [
+      {
+        id: 'aud-seed',
+        dateHeure: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        operateur: 'Système',
+        role: 'SuperAdmin',
+        action: 'PROVISION_DB',
+        description: 'Licence provisionnée. Super-administrateur créé et clé de chiffrement initialisée.'
+      }
+    ];
+
+    // Manage role and modules configuration based on the configured plan
+    const planConfig = saasPlanConfigs[newClient.plan] || { modules: ['dashboard', 'agriculture', 'stocks', 'ged'] };
+    newDb.systemSettings = {
+      ...newDb.systemSettings,
+      activeRoleId: 'role-superadmin',
+      roles: [
+        {
+          id: 'role-superadmin',
+          name: 'Super Administrateur',
+          modules: planConfig.modules,
+          canModify: true,
+          canDelete: true,
+          canImport: true,
+          canExport: true
+        }
+      ]
+    };
+
+    setDatabases(prev => {
+      const updated = { ...prev, [newClient.id]: newDb };
+      localStorage.setItem('tenantDatabases', JSON.stringify(updated));
+      return updated;
+    });
+
     const log: SaaSLog = {
       id: 'l-' + Math.floor(Math.random() * 10000),
       date: new Date().toISOString().replace('T', ' ').substring(0, 19),
@@ -822,6 +915,39 @@ export default function App() {
     // If the currently active customer's status became suspended, keep activeTenant in sync to lock views
     if (activeTenant.id === clientId) {
       setActiveTenant(prev => ({ ...prev, statut: status }));
+    }
+  };
+
+  const handleUpdateClient = (updatedClient: SaaSClient) => {
+    setSaasClients(prev => {
+      const updated = prev.map(c => c.id === updatedClient.id ? updatedClient : c);
+      localStorage.setItem('saasClients', JSON.stringify(updated));
+      return updated;
+    });
+    if (activeTenant?.id === updatedClient.id) {
+      setActiveTenant(updatedClient);
+      localStorage.setItem('activeTenant', JSON.stringify(updatedClient));
+    }
+    const log: SaaSLog = {
+      id: 'l-' + Math.floor(Math.random() * 10000),
+      date: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      utilisateur: 'SaaS Admin',
+      ip: '192.168.1.100',
+      action: `Mise à jour des informations client : ${updatedClient.raisonSociale}`,
+      module: 'SaaS Engine',
+      statut: 'Succès'
+    };
+    setSaasLogs(prev => [log, ...prev]);
+  };
+
+  const handleUpdateTenantDatabase = (tenantId: string, updatedDb: TenantDatabase) => {
+    setDatabases(prev => {
+      const updated = { ...prev, [tenantId]: updatedDb };
+      localStorage.setItem('tenantDatabases', JSON.stringify(updated));
+      return updated;
+    });
+    if (activeTenant?.id === tenantId) {
+      if (updatedDb.utilisateurs) setUtilisateurs(updatedDb.utilisateurs);
     }
   };
 
@@ -1301,7 +1427,7 @@ export default function App() {
 
     if (foundUser && foundTenant) {
       if (foundTenant.statut === 'Suspendu' || foundTenant.statut === 'Résilié') {
-        setSuspendedClientMessage(`🚫 Accès Suspendu — L’abonnement de l’instance "${foundTenant.raisonSociale}" est inactif. Veuillez régulariser votre formule auprès de l’éditeur.`);
+        setSuspendedClientMessage(`Votre restaurant a été désactivé. Veuillez contacter l'administrateur de la plateforme.`);
         return;
       }
       setIsLoggedIn(true);
@@ -1325,7 +1451,7 @@ export default function App() {
 
     if (matchedClient) {
       if (matchedClient.statut === 'Suspendu' || matchedClient.statut === 'Résilié') {
-        setSuspendedClientMessage(`🚫 Accès Suspendu — L’abonnement de l’instance "${matchedClient.raisonSociale}" est inactif. Veuillez régulariser votre formule auprès de l’éditeur.`);
+        setSuspendedClientMessage(`Votre restaurant a été désactivé. Veuillez contacter l'administrateur de la plateforme.`);
         return;
       }
       setIsLoggedIn(true);
@@ -1339,7 +1465,8 @@ export default function App() {
         email: matchedClient.superAdminLogin || '',
         password: matchedClient.superAdminPassword || '',
         roleId: 'role-superadmin',
-        statut: 'Actif'
+        statut: 'Actif',
+        mustChangePassword: matchedClient.mustChangePassword
       };
       setCurrentUser(adminVirtuel);
       return;
@@ -1385,6 +1512,405 @@ export default function App() {
       roleId: 'role-superadmin',
       statut: 'Actif'
     });
+  };
+
+  const handleExportClientPageText = () => {
+    let today = new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    let filename = `export-erp-${erpTab}-${new Date().toISOString().split('T')[0]}.txt`;
+    let content = "";
+
+    content += `================================================================================\n`;
+    content += `  RAPPORT EXPLICATIF ET RECAPITULATIF METIER - PAGE : ${erpTab.toUpperCase()}\n`;
+    content += `  ORGANISATION : ${activeTenant.raisonSociale.toUpperCase()} (${activeTenant.sigle})\n`;
+    content += `================================================================================\n`;
+    content += `Généré le : ${today}\n`;
+    content += `Rôle utilisateur actif : ${simulatedRole?.name || 'Super Administrateur'}\n`;
+    content += `Période active d'analyse : Année en cours 2026\n`;
+    content += `Filtres de dates par défaut : Du 01 Janvier 2026 au 31 Décembre 2026\n`;
+    content += `Statut d'intégration : SYNCHRONISÉ AVEC LE SERVEUR PORT: 3000\n\n`;
+
+    if (erpTab === 'dashboard') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. PRÉSENTATION DU COCKPIT GÉNÉRAL ET ALERTES D'EXPLOSION\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Le Cockpit Général constitue le tableau de bord d'aide à la décision pour les gestionnaires.\n`;
+      content += `Il rassemble les flux d'informations météorologiques directes, le niveau d'alertes par ordre de\n`;
+      content += `priorité, et des métriques synthétiques du foncier agricole et de la production animale.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. DIAGNOSTIC GLOBALE DE L'ACTIVITÉ (CHIFFRES CLÉS)\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `- Nombre d'exploitations agricoles actives : ${exploitations.length}\n`;
+      content += `- No. de sites d’implantation (champs) : ${champs.length}\n`;
+      content += `- Nombre total de parcelles subdivisées : ${parcelles.length}\n`;
+      content += `- Cheptel d'animaux sous surveillance : ${animaux.length}\n`;
+      content += `- Nombre de collaborateurs enregistrés : ${employes.length}\n`;
+      content += `- Règlements clients & facturations : ${factures.length} opérations enregistrées\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `3. COMPTE-RENDU DES DERNIÈRES ALERTES CRITIQUES ENREGISTRÉES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (notifications.length === 0) {
+        content += `=> Aucune alerte prioritaire signalée dans le cockpit.\n`;
+      } else {
+        notifications.forEach((n) => {
+          content += `[Alerte du ${n.date}] - Priorité : ${n.priorite}\n`;
+          content += `  * Titre : ${n.titre}\n`;
+          content += `  * Description : "${n.description}"\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'agriculture') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. RAPPORT GLOBAL DU MODULE DE PRODUCTION VÉGÉTALE / AGRONOMIE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Ce rapport détaille la gestion du foncier, l'état de développement des plantes cultivées\n`;
+      content += `et le carnet des interventions d’entretien (fertilisation, irrigation, pulvérisation) réalisées.\n`;
+      content += `Ces opérations sont fondamentales pour certifier la traçabilité des récoltes livrées aux abonnés.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. CADRE DE SUIVI DES EXPLOITATIONS ET PARCELLES SÉLECTIONNÉES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (parcelles.length === 0) {
+        content += `=> Aucune parcelle enregistrée dans l'unité.\n`;
+      } else {
+        parcelles.forEach((p) => {
+          content += `PARCELLE REF: ${p.id} - Nom : ${p.nom}\n`;
+          content += `  - Surface : ${p.superficie} Hectares | Type de Sol : ${p.typeSol}\n`;
+          content += `  - Statut de Culture : ${p.cultureActive || 'En jachère'}\n`;
+          content += `  - Date de début d'exploitation : ${p.dateCreation || 'N/A'}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. SYNTHÈSE DES INTERVENTIONS PHYTOSANITAIRES ET ENTRETIEN EN COURS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (interventions.length === 0) {
+        content += `=> Aucun ordre d'intervention enregistré.\n`;
+      } else {
+        interventions.forEach((it) => {
+          content += `[Date: ${it.date}] Intervention : ${it.type} (Parcelle : ${it.parcelleId})\n`;
+          content += `  - Responsable affecté : ${it.responsable}\n`;
+          content += `  - Substance utilisée : ${it.produitUtilise || 'Aucune'}\n`;
+          content += `  - Statut : ${it.statut}\n`;
+          content += `  - Description : ${it.notes}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `4. JOURNAL HISTORIQUE DES RÉCOLTES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (recoltes.length === 0) {
+        content += `=> Aucune récolte déclarée pour la saison active.\n`;
+      } else {
+        recoltes.forEach((r) => {
+          content += `Récolte Référence: ${r.id} (Date: ${r.dateRecolte})\n`;
+          content += `  - Culture : ${r.cultureId}\n`;
+          content += `  - Quantité récoltée : ${r.quantiteRecoltee} ${r.unite || 'Kg'}\n`;
+          content += `  - Qualité estimée   : ${r.qualite}\n`;
+          content += `  - Destination dépôt : ${r.magasinStockageId || 'Non spécifié'}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'elevage') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. EXPLICATION DE L'ACTIVITÉ ET DU SUIVI ZOOTECHNIQUE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Le volet de Production Animale automatise le carnet de santé, les cycles d'alimentation,\n`;
+      content += `la généalogie des troupeaux d’élevage et la mesure des rendements laitiers ou carnés.\n`;
+      content += `L'un des objectifs majeurs est la prévention des infections et le suivi vétérinaire rigoureux.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. METRIQUES DES TROUPEAUX ET DETAILS INDIVIDUELS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `- Nombre de troupeaux distincts : ${troupeaux.length}\n`;
+      content += `- Nombre de têtes d'animaux sous inventaire : ${animaux.length}\n\n`;
+
+      if (animaux.length === 0) {
+        content += `=> Aucun animal enregistré.\n`;
+      } else {
+        animaux.forEach((a) => {
+          content += `ID UNIQUE ANIMAL: ${a.codeIdentification} (Nom: ${a.nom})\n`;
+          content += `  - Espèce / Race : ${a.espece} - ${a.race || 'Non spécifié'}\n`;
+          content += `  - Genre / Sexe  : ${a.sexe}\n`;
+          content += `  - Date Naissance: ${a.dateNaissance}\n`;
+          content += `  - Statut Sanitaire : ${a.statutSante}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. CARNET SANITAIRE ET ACTIONS PHYTOSANITAIRES RÉCENTES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (carnetsSanitaires.length === 0) {
+        content += `=> Aucun traitement vétérinaire répertorié.\n`;
+      } else {
+        carnetsSanitaires.forEach((cs) => {
+          content += `[Date: ${cs.dateVisite}] Diagnostic pour l'animal : ${cs.animalId}\n`;
+          content += `  - Traitement administré : ${cs.traitementPrescrit}\n`;
+          content += `  - Vétérinaire en charge  : ${cs.veterinaireNom || 'N/A'}\n`;
+          content += `  - Résultat de l'analyse : ${cs.observations}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'stocks') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. COMPTABILITÉ-MATIÈRES ET LOGISTIQUE DE STOCKAGE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Le Module Stocks administre l'approvisionnement en semences, engrais, nourritures bétail et\n`;
+      content += `l'affectation des produits finis issus des récoltes.\n`;
+      content += `Il émet des alertes de rupture basées sur des seuils de sécurité configurables par magasin.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. REPERTOIRE DES ENTREPÔTS ET MAGASINS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (magasins.length === 0) {
+        content += `=> Aucun magasin enregistré dans l'entité.\n`;
+      } else {
+        magasins.forEach((m) => {
+          content += `- [${m.code}] ${m.nom} - Localisation : ${m.emplacement} (Capacité : ${m.capaciteMax} m³)\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. INVENTAIRE SUR LES ARTICLES COMPTABLES EN DISPONIBILITÉ\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (articles.length === 0) {
+        content += `=> Pas d’article référencé.\n`;
+      } else {
+        articles.forEach((art) => {
+          content += `ARTICLE REF: ${art.codeSku} - ${art.nom}\n`;
+          content += `  - Catégorie : ${art.categorie} | Type : ${art.nature}\n`;
+          content += `  - Stock Réel Physique : ${art.quantiteStock} ${art.uniteMesure}\n`;
+          content += `  - Seuil d'Alerte : ${art.seuilAlerte} ${art.uniteMesure}\n`;
+          content += `  - Valeur Unitaire : ${art.prixUnitaireMoyen.toLocaleString()} FCFA\n`;
+          content += `  - Statut : ${art.quantiteStock <= art.seuilAlerte ? '🚨 RUPTURE IMMINENTE' : '✓ OK'}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'parc-materiel') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. DESCRIPTION GÉNÉRALE DU PARC ET LOGISTIQUES GMAO\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Ce rapport concerne la gestion assistée par ordinateur de nos matériels (tracteurs, semoirs, broyeurs).\n`;
+      content += `Il enregistre les heures d'utilisation réelles des engins, gère les plans de maintenance\n`;
+      content += `préventive pour éviter les pannes en pleine saison de labour, et orchestre le suivi des assurances.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. LISTE DU MATÉRIEL MÉCANIQUE SOUS GESTION\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (equipements.length === 0) {
+        content += `=> Aucun engin lourd enregistré.\n`;
+      } else {
+        equipements.forEach((eq) => {
+          content += `MACHINE REF: ${eq.id} - ${eq.nom} (${eq.marque})\n`;
+          content += `  - Immatriculation / Série : ${eq.immatriculation || 'N/A'}\n`;
+          content += `  - Compteur Horaire : ${eq.compteurHeures} Heures\n`;
+          content += `  - Statut Operationnel : ${eq.statut}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. ENREGISTREMENTS DES PANNES ET ACTIONS PREVENTIVES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (pannesEquipement.length === 0) {
+        content += `=> Zéro panne mécanique ou anomalie signalée.\n`;
+      } else {
+        pannesEquipement.forEach((p) => {
+          content += `Panne No: ${p.id} (Date: ${p.dateSignalement}) - Gravité : ${p.gravite}\n`;
+          content += `  - Équipement impacté : ${p.equipementId}\n`;
+          content += `  - Libellé problème : ${p.description}\n`;
+          content += `  - Solution apportée : ${p.solutionAction || 'En attente d\'intervention'}\n`;
+          content += `  - Statut de la panne : ${p.statut}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'commercial') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. RAPPORT METIER - MODULE TRANSACTIONS COMMERCIALES & CRM\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Ce dossier couvre l'ensemble de la chaine de valeur contractuelle : de l'émission\n`;
+      content += `des quotes-parts d'achats auprès de nos fournisseurs agréés, jusqu'au suivi de facturation\n`;
+      content += `commerciale de nos cultures agricoles vendues aux grossistes de la sous-région CEMAC.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. SOMMAIRE DU REGISTRE DES CLIENTS ACHETEURS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (clientsAcheteurs.length === 0) {
+        content += `=> Aucun acheteur dans le CRM.\n`;
+      } else {
+        clientsAcheteurs.forEach((cl) => {
+          content += `- CRM Ref [${cl.id}] : ${cl.nomEntreprise} | Responsable : ${cl.contactNom} (Tel : ${cl.telephone})\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. CAHIER DES FACTURES ET COMMANDES ENCOURS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (factures.length === 0) {
+        content += `=> Aucune transaction commerciale finalisée.\n`;
+      } else {
+        factures.forEach((fc) => {
+          content += `Facture No: ${fc.codeFacture} (Date: ${fc.dateEmission})\n`;
+          content += `  - Destinataire Client : ${fc.clientNom || 'N/A'}\n`;
+          content += `  - Montant brut HT    : ${fc.montantHT.toLocaleString()} FCFA\n`;
+          content += `  - Règlements perçus  : ${fc.montantPaye.toLocaleString()} FCFA\n`;
+          content += `  - Statut d'échéance : ${fc.statutPaiement}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'compta') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. RAPPORT DE GESTION COMPTABLE ET CONFORMITÉ DE L'EXERCICE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `L'outil comptable automatise la saisie et le lettrage des pièces justificatives,\n`;
+      content += `génère la balance générale et le Grand Livre conformément aux critères OHADA d'Afrique Centrale.\n`;
+      content += `Il surveille de près l'exécution du budget alloué par zone d'exploitation.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. ECRITURES SAISIES DANS LE LIVRE DE COMPTABILITÉ\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (piecesComptables.length === 0) {
+        content += `=> Aucune écriture comptable journalisée.\n`;
+      } else {
+        piecesComptables.forEach((pc) => {
+          content += `PIÈCE REF: ${pc.numeroPiece} (Date: ${pc.dateComptable}) - Journal : [${pc.journalType}]\n`;
+          content += `  - Libellé opération : ${pc.libelle}\n`;
+          content += `  - Colonne Débit : ${pc.debit.toLocaleString()} FCFA\n`;
+          content += `  - Colonne Crédit : ${pc.credit.toLocaleString()} FCFA\n`;
+          content += `  - Compte Général de Charge: ${pc.compteGeneral}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. BUDGET D'EXPLOITATION AGRICOLE COMPILÉ\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (budgets.length === 0) {
+        content += `=> Pas de feuille de budget disponible.\n`;
+      } else {
+        budgets.forEach((b) => {
+          content += `BUDGET : ${b.nom} (Catégorie: ${b.categorie})\n`;
+          content += `  - Enveloppe allouée : ${b.montantAlloue.toLocaleString()} FCFA\n`;
+          content += `  - Crédits consommés : ${b.montantDepense.toLocaleString()} FCFA\n`;
+          content += `  - Marge de sécurité disponible : ${(b.montantAlloue - b.montantDepense).toLocaleString()} FCFA\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'rh') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. EXPLICATION THÉORIQUE DU CAPITAL HUMAIN ET DE LA PAIE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `La ressource humaine de l'instance centralise l'engagement contractuel du personnel permanent\n`;
+      content += `et temporaire (ouvriers journaliers). Le terminal de présence pointe de manière géolocalisée\n`;
+      content += `les heures de travail réelles afin d'évaluer les bulletins de paie mensuels en conformité\n`;
+      content += `avec la réglementation s'appliquant au code du travail local.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. ACCES AU REGISTRE DU PERSONNEL EN SERVICE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (employes.length === 0) {
+        content += `=> Aucun employé listé pour cette instance d'exploitation.\n`;
+      } else {
+        employes.forEach((emp) => {
+          content += `MATRICULE: ${emp.matricule} - Nom Complet : ${emp.nom} ${emp.prenom}\n`;
+          content += `  - Fonction / Poste : ${emp.poste}\n`;
+          content += `  - Rémunération de base : ${emp.salaireBase.toLocaleString()} FCFA / mois\n`;
+          content += `  - Contrat d'embauche : ${emp.typeContrat} | Date début : ${emp.dateEmbauche}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+
+      content += `\n--------------------------------------------------------------------------------\n`;
+      content += `3. DERNIER ÉTAT DE PRÉSENCE JOURNALIÈRE\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (presences.length === 0) {
+        content += `=> Aucun pointage de présence n'a été validé aujourd'hui.\n`;
+      } else {
+        presences.forEach((pr) => {
+          content += `[Date: ${pr.date}] Collaborateur : ${pr.employeId}\n`;
+          content += `  - Statut : ${pr.statut} (Arrivée: ${pr.heureArrivee || 'n/a'} - Départ: ${pr.heureDepart || 'n/a'})\n`;
+          content += `  - Activités affectées au champ : ${pr.conceptActivite || 'Non spécifiée'}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'ged') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. LOGISTIQUES DU COFFRE-FORT NUMÉRIQUE ET LIENS UTILES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `La plateforme de GED (Gestion Électronique des Documents) stocke les relevés cadastraux,\n`;
+      content += `les contrats d'achats scannés, les ordonnances du médecin vétérinaire et les factures douanières.\n`;
+      content += `Il garantit un hébergement chiffré et sécurisé des données stratégiques des coopératives agricoles.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. INDEX HISTORIQUE DES ARCHIVES DOCUMENTAIRES ENREGISTRÉES\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (documents.length === 0) {
+        content += `=> Le coffre-fort numérique ne contient pour l'instant aucun document.\n`;
+      } else {
+        documents.forEach((doc) => {
+          content += `FICHIER REF: ${doc.id} - ${doc.nomFichier}\n`;
+          content += `  - Type d'archive : ${doc.typeMime} | Taille : ${(doc.tailleKo).toFixed(1)} Ko\n`;
+          content += `  - Date d'archivage : ${doc.dateStockage} par ${doc.auteur}\n`;
+          content += `  - Catégorie d'organisation : ${doc.categorieUsage}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'bi-reporting') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. PRESENTATION DU SYSTEME DE BUSINESS INTELLIGENCE ET REPORTING\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Ce rapport décisionnel évalue les indicateurs clés de performance (KPI) stratégiques\n`;
+      content += `sur les couts de revient, rendement des récoltes par hectare et taux de réussite vétérinaire.\n`;
+      content += `Il permet de piloter la vision agrotechnologique de l'entente d'exploitation.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. TABLEAU COMPARATIF DES INDICATEURS KPI ANALYSÉS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      if (indicateursKPI.length === 0) {
+        content += `=> Pas d'indicateur KPI modélisé.\n`;
+      } else {
+        indicateursKPI.forEach((kpi) => {
+          content += `KPI : ${kpi.nomCode} (${kpi.moduleCible.toUpperCase()})\n`;
+          content += `  - Libellé complet : ${kpi.libelleExplicatif}\n`;
+          content += `  - Valeur réelle calculée : ${kpi.valeurReelle} ${kpi.uniteMesure || ''}\n`;
+          content += `  - Cible fixée : ${kpi.valeurCible} ${kpi.uniteMesure || ''}\n`;
+          content += `  - Ecart enregistré : ${kpi.ecartConstate >= 0 ? '+' : ''}${kpi.ecartConstate}%\n`;
+          content += `  - Degré d'atteinte : ${kpi.statutAlarme}\n`;
+          content += `  ------------------------------------------------------------------------------\n`;
+        });
+      }
+    } else if (erpTab === 'settings') {
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `1. DESCRIPTION DES CONFIGURATIONS SYSTEME\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `Cette section regroupe les paramètres fondamentaux de personnalisation de l'instance.\n`;
+      content += `Elle régit les profils de rôles utilisateurs et l'appellation spécifique des types d'intrants.\n\n`;
+
+      content += `--------------------------------------------------------------------------------\n`;
+      content += `2. CHRONOLOGIE DES ROLES APPLICATIFS ACTIFS\n`;
+      content += `--------------------------------------------------------------------------------\n`;
+      systemSettings.roles.forEach((rol) => {
+        content += `RÔLE PROFILE : ${rol.name}\n`;
+        content += `  - Modules d'accès autorisés : ${rol.modules.join(', ')}\n`;
+        content += `  - Droits de permissions : Modifier = ${rol.canModify ? 'OUI':'NON'} | Supprimer = ${rol.canDelete ? 'OUI':'NON'} | Exporter = ${rol.canExport ? 'OUI':'NON'}\n`;
+        content += `  ------------------------------------------------------------------------------\n`;
+      });
+    }
+
+    // Download text handler
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const handleLogout = () => {
@@ -1463,32 +1989,99 @@ export default function App() {
 
             {/* Direct list of registered SaaS client directories for quick audit and validation */}
             <div className="mt-4 pt-4 border-t border-slate-700/60 text-xs space-y-2">
-              <span className="font-extrabold text-slate-300 block text-[10.5px] uppercase tracking-wider">🏢 Comptes Clients SaaS Actifs ({saasClients.length}) :</span>
-              <div className="max-h-48 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                {saasClients.map(c => (
-                  <div key={c.id} className="p-2.5 bg-slate-905 bg-slate-900/60 border border-slate-700/50 rounded-lg flex items-center justify-between gap-1.5 hover:border-indigo-500/50 transition">
-                    <div className="truncate flex-1">
-                      <span className="font-bold text-slate-100 block text-[11px] truncate">{c.raisonSociale}</span>
-                      <span className="text-[10px] text-slate-400 block truncate font-mono">Em: {c.superAdminLogin}</span>
-                      <span className="text-[9.5px] text-slate-500 block font-mono">Mdp: {c.superAdminPassword}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLoginEmail(c.superAdminLogin || '');
-                        setLoginPassword(c.superAdminPassword || '');
-                        setIsLoggedIn(true);
-                        setAuthRole('superadmin');
-                        switchActiveTenant(c);
-                        setAppMode('client-erp');
-                      }}
-                      className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[10px] rounded-md transition shrink-0 uppercase tracking-tight"
-                    >
-                      1-Clic
-                    </button>
-                  </div>
-                ))}
+              <div className="flex items-center justify-between">
+                <span className="font-extrabold text-slate-300 block text-[10.5px] uppercase tracking-wider">
+                  🏢 Comptes Clients SaaS Actifs
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (showSaaSList) {
+                      setShowSaaSList(false);
+                      setSaaSListPasscode('');
+                      setSaaSListError('');
+                    } else {
+                      setSaaSListError('');
+                    }
+                  }}
+                  className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold transition flex items-center gap-1 cursor-pointer"
+                >
+                  {showSaaSList ? (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5" /> Masquer
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="h-3.5 w-3.5" /> Déverrouiller
+                    </>
+                  )}
+                </button>
               </div>
+
+              {!showSaaSList ? (
+                <div className="bg-slate-900/40 border border-slate-800 p-3 rounded-xl space-y-2">
+                  <p className="text-[10.5px] text-slate-400 leading-relaxed font-medium">
+                    🔒 Ce volet de diagnostic est masqué par sécurité. Saisissez le code d'administration pour tester.
+                  </p>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      setSaaSListError('');
+                      const checkPass = saaSListPasscode.trim().toLowerCase();
+                      if (checkPass === 'vito' || checkPass === 'veto') {
+                        setShowSaaSList(true);
+                        setSaaSListError('');
+                      } else {
+                        setSaaSListError('❌ Code d\'accès incorrect.');
+                      }
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      type="password"
+                      placeholder="Mot de passe d'accès..."
+                      value={saaSListPasscode}
+                      onChange={(e) => setSaaSListPasscode(e.target.value)}
+                      className="flex-1 text-[11px] bg-slate-800 text-slate-200 placeholder-slate-500 rounded-lg border border-slate-700 p-1.5 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[10px] rounded-lg transition cursor-pointer shrink-0"
+                    >
+                      Valider
+                    </button>
+                  </form>
+                  {saaSListError && (
+                    <p className="text-[10px] text-rose-400 font-semibold">{saaSListError}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="max-h-48 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                  {saasClients.map(c => (
+                    <div key={c.id} className="p-2.5 bg-slate-905 bg-slate-900/60 border border-slate-700/50 rounded-lg flex items-center justify-between gap-1.5 hover:border-indigo-500/50 transition">
+                      <div className="truncate flex-1">
+                        <span className="font-bold text-slate-100 block text-[11px] truncate">{c.raisonSociale}</span>
+                        <span className="text-[10px] text-slate-400 block truncate font-mono">Em: {c.superAdminLogin}</span>
+                        <span className="text-[9.5px] text-slate-500 block font-mono">Mdp: {c.superAdminPassword}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLoginEmail(c.superAdminLogin || '');
+                          setLoginPassword(c.superAdminPassword || '');
+                          setIsLoggedIn(true);
+                          setAuthRole('superadmin');
+                          switchActiveTenant(c);
+                          setAppMode('client-erp');
+                        }}
+                        className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[10px] rounded-md transition shrink-0 uppercase tracking-tight"
+                      >
+                        1-Clic
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -1522,28 +2115,42 @@ export default function App() {
                 </div>
               )}
 
-              {/* Credentials hints specifically for review */}
-              <div className="mt-4 p-3 bg-indigo-50 border border-indigo-100 rounded-xl space-y-1 text-[10.5px] text-slate-600">
-                <span className="font-bold text-indigo-900 block">💡 Comptes de tests configurés :</span>
-                <div>
-                  • Client Payé: <code className="font-mono bg-white px-1 py-0.2 rounded border">admin@kissineagro.cm</code> (Mot de passe: <code className="font-mono bg-white px-1 py-0.2 rounded border">superadmin123</code>)
+              {/* Description box of MEFOUP-FLOW ERP key features replacing credentials box */}
+              <div className="mt-4 p-4 bg-slate-55 bg-slate-50 border border-slate-100 rounded-xl space-y-3 text-slate-600">
+                <span className="font-extrabold text-slate-700 block text-[10px] uppercase tracking-widest text-[#4f46e5]">
+                  🚀 FONCTIONNALITÉS CLÉS DU SIG-ERP MEFOUP-FLOW :
+                </span>
+                <div className="grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="p-2 bg-white rounded-lg border border-slate-100/80">
+                    <span className="font-bold text-slate-800 block">📊 Comptabilité SYSCOHADA</span>
+                    <p className="text-[9px] text-slate-500 mt-0.5 leading-relaxed">Journaux, états financiers OHADA et balance analytique automated.</p>
+                  </div>
+                  <div className="p-2 bg-white rounded-lg border border-slate-100/80">
+                    <span className="font-bold text-slate-800 block">🌱 Gestion Agricole</span>
+                    <p className="text-[9px] text-slate-500 mt-0.5 leading-relaxed">Suivi des campagnes, consommables et rendements parcellaires.</p>
+                  </div>
+                  <div className="p-2 bg-white rounded-lg border border-slate-100/80">
+                    <span className="font-bold text-slate-800 block">🐄 Élevage & Santé</span>
+                    <p className="text-[9px] text-slate-500 mt-0.5 leading-relaxed">Fiches d'identité des bêtes, traçabilité et programmation de vaccins.</p>
+                  </div>
+                  <div className="p-2 bg-white rounded-lg border border-slate-100/80">
+                    <span className="font-bold text-slate-800 block">📁 Archivage GED</span>
+                    <p className="text-[9px] text-slate-500 mt-0.5 leading-relaxed">Numérisation et centralisation sécurisée des pièces justificatives.</p>
+                  </div>
                 </div>
-                <div>
-                  • Éditeur / Fournisseur: <code className="font-mono bg-white px-1 py-0.2 rounded border">provider@mefoup.com</code> (Mot de passe: <code className="font-mono bg-white px-1 py-0.2 rounded border">mefoup2026</code>)
-                </div>
-                <div className="flex justify-between items-center pt-1.5 border-t border-indigo-100 mt-1.5">
-                  <span className="text-[9.5px] text-slate-400">Besoin d'un nouveau départ ?</span>
+                <div className="flex justify-between items-center pt-2 border-t border-slate-100">
+                  <span className="text-[9px] text-slate-400">Réinitialiser le système</span>
                   <button 
                     type="button" 
                     onClick={() => {
-                      if (window.confirm("Réinitialiser l'application aux paramètres d'usine ? Toutes les modifications locales seront effacées.")) {
-                        localStorage.clear();
-                        window.location.reload();
-                      }
+                      setResetPasswordInput('');
+                      setResetStep('password');
+                      setResetError('');
+                      setShowResetModal(true);
                     }} 
                     className="text-[9.5px] text-rose-600 hover:underline font-extrabold transition cursor-pointer"
                   >
-                    Réinitialiser l'application
+                    Réinitialiser
                   </button>
                 </div>
               </div>
@@ -1595,6 +2202,209 @@ export default function App() {
         <footer className="p-4 border-t border-slate-800 text-center font-mono text-[10px] text-zinc-500">
           © 2026 MEFOUP-FLOW SaaS Agricole • Conçu pour l'Afrique Agro-Industrielle d'aujourd'hui.
         </footer>
+
+        {/* Custom Reset Modal (safe for sandboxed iframes) */}
+        {showResetModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4">
+            <div className="bg-slate-900 border border-slate-700/80 max-w-md w-full rounded-2xl p-6 shadow-2xl relative space-y-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowResetModal(false);
+                  setResetPasswordInput('');
+                  setResetError('');
+                  setResetStep('password');
+                }}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white text-xs font-bold bg-slate-850 px-2 py-1 rounded-md cursor-pointer transition"
+              >
+                Fermer ✕
+              </button>
+              
+              <div className="text-center space-y-2 mt-2">
+                <div className="mx-auto h-12 w-12 bg-rose-500/15 rounded-xl flex items-center justify-center border border-rose-500/30 text-rose-400">
+                  <ShieldAlert className="h-6 w-6" />
+                </div>
+                <h3 className="text-lg font-black text-white">Réinitialisation d'Usine</h3>
+                <p className="text-xs text-slate-400">
+                  Le système requiert le code d'autorisation pour restaurer les paramètres par défaut.
+                </p>
+              </div>
+
+              {resetStep === 'password' ? (
+                <form 
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setResetError('');
+                    const checkPass = resetPasswordInput.trim().toLowerCase();
+                    if (checkPass === 'vito' || checkPass === 'veto') {
+                      setResetStep('confirm');
+                    } else {
+                      setResetError('❌ Mot de passe administrateur incorrect.');
+                    }
+                  }} 
+                  className="space-y-3.5"
+                >
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Mot de passe de sécurité</label>
+                    <input
+                      type="password"
+                      required
+                      value={resetPasswordInput}
+                      onChange={(e) => setResetPasswordInput(e.target.value)}
+                      placeholder="Saisissez 'vito' pour tester..."
+                      className="w-full text-xs bg-slate-800 text-slate-100 placeholder-slate-500 rounded-xl border border-slate-705 border-slate-700 p-3 focus:outline-hidden focus:ring-1 focus:ring-rose-500"
+                    />
+                    {resetError && (
+                      <p className="text-xs text-rose-400 font-semibold mt-1.5">{resetError}</p>
+                    )}
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full bg-rose-600 font-extrabold text-xs py-3 rounded-xl hover:bg-rose-500 text-white transition shadow-sm cursor-pointer"
+                  >
+                    Valider le code
+                  </button>
+                </form>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-rose-950/30 border border-rose-500/20 p-3.5 rounded-xl text-[11.5px] text-rose-300 leading-relaxed font-medium">
+                    ⚠️ <strong>Attention !</strong> Cette action est définitive et irréversible. Toutes les données locales (vos exploitations, clients facturés, budgets saisis, utilisateurs et pièces justificatives GED) seront effacées de votre navigateur.
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowResetModal(false);
+                        setResetPasswordInput('');
+                        setResetStep('password');
+                      }}
+                      className="flex-1 border border-slate-700 hover:bg-slate-800 text-slate-300 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        localStorage.clear();
+                        window.location.reload();
+                      }}
+                      className="flex-1 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                    >
+                      EFFACER TOUT
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Force Change Password on First Login
+  if (isLoggedIn && currentUser?.mustChangePassword) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 md:p-12 font-sans text-white">
+        <div className="max-w-md w-full bg-slate-800 rounded-2xl border border-slate-700 shadow-2xl p-6 md:p-8 space-y-6">
+          <div className="text-center">
+            <div className="mx-auto h-12 w-12 bg-indigo-600/20 rounded-xl flex items-center justify-center mb-4 border border-indigo-500/30 text-indigo-400">
+              <Lock className="h-6 w-6" />
+            </div>
+            <span className="text-[10px] uppercase font-bold tracking-widest text-emerald-400">Première connexion requise</span>
+            <h2 className="text-xl font-black mt-1 text-slate-100">Changement de mot de passe obligatoire</h2>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Pour des raisons de sécurité, veuillez modifier le mot de passe provisoire défini par l'administrateur afin d'activer votre espace.
+            </p>
+          </div>
+
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const newPass = (e.currentTarget.elements.namedItem('newPass') as HTMLInputElement).value.trim();
+            const confirmPass = (e.currentTarget.elements.namedItem('confirmPass') as HTMLInputElement).value.trim();
+            
+            if (newPass.length < 5) {
+              alert('Le mot de passe doit contenir au moins 5 caractères.');
+              return;
+            }
+            if (newPass !== confirmPass) {
+              alert('Les mots de passe ne correspondent pas.');
+              return;
+            }
+
+            // Update user in tenant database
+            const tenantId = activeTenant.id;
+            const tenantDb = databases[tenantId] || getInitialDatabase(tenantId);
+            const userList = tenantDb.utilisateurs || [];
+            
+            // Check if is direct superadmin
+            if (activeTenant.superAdminLogin?.toLowerCase() === currentUser.email.toLowerCase()) {
+              const updatedClient = {
+                ...activeTenant,
+                superAdminPassword: newPass,
+                mustChangePassword: false
+              };
+              handleUpdateClient(updatedClient);
+            }
+
+            // Also search and update in the specific tenant user lists
+            const updatedUsers = userList.map(u => {
+              if (u.id === currentUser.id || u.email.toLowerCase() === currentUser.email.toLowerCase()) {
+                return { ...u, password: newPass, mustChangePassword: false };
+              }
+              return u;
+            });
+
+            handleUpdateTenantDatabase(tenantId, {
+              ...tenantDb,
+              utilisateurs: updatedUsers
+            });
+
+            // Update local user session state
+            setCurrentUser(prev => prev ? { ...prev, password: newPass, mustChangePassword: false } : null);
+
+            logAudit('PASSWORD_RENEWAL', 'Changement obligatoire du mot de passe réussi lors de la première connexion', currentUser.nom, 'Utilisateur');
+            alert('✅ Mot de passe modifié avec succès! Vous êtes maintenant connecté.');
+          }} className="space-y-4 text-slate-300">
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 mb-1.5">Nouveau Mot de Passe</label>
+              <input
+                name="newPass"
+                type="password"
+                required
+                placeholder="Nouveau mot de passe"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs outline-hidden text-white focus:border-indigo-500 transition"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 mb-1.5">Confirmez le Mot de Passe</label>
+              <input
+                name="confirmPass"
+                type="password"
+                required
+                placeholder="Confirmez le mot de passe"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs outline-hidden text-white focus:border-indigo-500 transition"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition flex items-center justify-center gap-2 shadow-md cursor-pointer mt-2"
+            >
+              <CheckCircle className="h-4 w-4" />
+              Activer mon compte & Entrer dans l'ERP
+            </button>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full bg-slate-700 hover:bg-slate-650 text-slate-300 font-bold text-xs py-2 px-4 rounded-xl transition mt-2 cursor-pointer"
+            >
+              Retour à l'accueil
+            </button>
+          </form>
+        </div>
       </div>
     );
   }
@@ -1640,6 +2450,18 @@ export default function App() {
             <div className="bg-rose-900/30 border border-rose-500/30 text-rose-300 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5">
               <Laptop className="h-4 w-4" /> Tour de Contrôle Backoffice SaaS
             </div>
+          )}
+
+          {appMode === 'client-erp' && (
+            <button
+              id="btn-export-client-page"
+              onClick={handleExportClientPageText}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs py-2 px-3.5 rounded-lg border border-emerald-700 transition flex items-center gap-2 cursor-pointer shadow-md"
+              title="Exporter le contenu explicatif de la page active en format texte"
+            >
+              <Download className="h-4 w-4 text-emerald-100" />
+              Exporter Page (.txt)
+            </button>
           )}
 
           {/* Switch app mode button - STRICTLY EXCLUSIVE TO PROVIDER ROLE FOR ISOLATION */}
@@ -1890,6 +2712,11 @@ export default function App() {
               logs={saasLogs}
               onAddClient={handleProvisionTenant}
               onUpdateClientStatus={handleUpdateTenantStatus}
+              onUpdateClient={handleUpdateClient}
+              databases={databases}
+              onUpdateTenantDatabase={handleUpdateTenantDatabase}
+              planConfigs={saasPlanConfigs}
+              onUpdatePlanConfigs={setSaasPlanConfigs}
               allData={{
                 exploitations,
                 parcelles,
